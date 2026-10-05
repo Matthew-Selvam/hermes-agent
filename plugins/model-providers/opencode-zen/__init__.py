@@ -5,6 +5,7 @@ chat_completions reasoning translations (GLM-5.2, Kimi K2, DeepSeek, Ox Alpha).
 """
 
 from typing import Any
+from urllib.parse import urlparse
 
 from agent import reasoning_effort as re_
 from hermes_cli.version_info import get_version_info
@@ -107,7 +108,33 @@ class OpenCodeGoProfile(ProviderProfile):
 
 
 class OpenCodeZenProfile(ProviderProfile):
-    """OpenCode Zen - model-specific reasoning controls."""
+    """OpenCode Zen - model-specific reasoning and anonymous-access controls."""
+
+    def supports_anonymous_access(self, *, model: str | None, base_url: str | None = None) -> bool:
+        """Allow only the documented free chat model on Zen's official HTTPS endpoint.
+
+        A public ``/models`` response or a ``-free`` suffix is not proof that a model
+        accepts anonymous inference. Keep this exact and endpoint-scoped so a proxy or
+        future paid model cannot inherit keyless access accidentally.
+        """
+        if _flat_model_name(model) not in self.keyless_model_ids:
+            return False
+        candidate = str(base_url or self.base_url or "").strip()
+        try:
+            parsed = urlparse(candidate)
+            return bool(
+                parsed.scheme == "https"
+                and parsed.hostname == "opencode.ai"
+                and parsed.port in (None, 443)
+                and not parsed.username
+                and not parsed.password
+                and parsed.path.rstrip("/") == "/zen/v1"
+                and not parsed.params
+                and not parsed.query
+                and not parsed.fragment
+            )
+        except ValueError:
+            return False
 
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
@@ -117,6 +144,7 @@ class OpenCodeZenProfile(ProviderProfile):
 
 opencode_zen = OpenCodeZenProfile(
     name="opencode-zen", aliases=("opencode", "opencode_zen", "zen"), env_vars=("OPENCODE_ZEN_API_KEY",),
+    keyless_model_ids=frozenset({"space-bunny-free"}),
     base_url="https://opencode.ai/zen/v1", default_headers=dict(_ATTRIBUTION_HEADERS),
     default_aux_model="gemini-3-flash",
 )

@@ -1475,7 +1475,7 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
     return None
 
 
-def _creds_for_current_provider(st: _Switch) -> None:
+def _creds_for_current_provider(st: _Switch) -> Optional[ModelSwitchResult]:
     """Credentials when staying on the current provider. Mid-session ``/model <name>`` on a local
     Ollama-compatible endpoint keeps the endpoint in use; re-resolving bare ``custom`` from config
     can fall through to an unrelated default provider."""
@@ -1504,8 +1504,29 @@ def _creds_for_current_provider(st: _Switch) -> None:
     else:
         try:
             st.resolve_runtime(requested=st.current_provider)
-        except Exception:
-            pass
+        except Exception as exc:
+            # A mixed-auth provider may legitimately have an empty key only for its declared
+            # keyless subset. Do not swallow the resulting missing-key error and carry anonymous
+            # credentials into a paid model; every other resolution error keeps the historical
+            # best-effort behavior below.
+            try:
+                from hermes_cli.auth import AuthError
+                from hermes_cli.runtime_provider import _provider_supports_anonymous_access
+                from providers import get_provider_profile
+
+                profile = get_provider_profile(st.current_provider)
+                has_keyless_subset = bool(getattr(profile, "keyless_model_ids", ()))
+                target_is_keyless = _provider_supports_anonymous_access(
+                    st.current_provider, model=st.new_model, base_url=st.current_base_url,
+                )
+                if isinstance(exc, AuthError) and has_keyless_subset and not st.current_api_key and not target_is_keyless:
+                    env_names = ", ".join(getattr(profile, "env_vars", ())) or "its API key"
+                    return st.fail_on_target(
+                        f"{st.provider_label} requires an API key for `{st.new_model}`. "
+                        f"Add {env_names} or choose a provider-declared keyless model."
+                    )
+            except Exception:
+                pass
         # Bare ``custom``/``local`` sessions whose base_url is session-only (not a trusted config
         # ``model.base_url``) re-resolve to the OpenRouter DEFAULT — a host the user never picked
         # (#74143). Keep the session endpoint + key then (also when the resolver came back empty,
@@ -1574,7 +1595,9 @@ def _resolve_switch_credentials(st: _Switch) -> Optional[ModelSwitchResult]:
         if fail is not None:
             return fail
     else:
-        _creds_for_current_provider(st)
+        fail = _creds_for_current_provider(st)
+        if fail is not None:
+            return fail
 
     # Direct alias override: use the alias's exact base_url if set.
     if st.resolved_alias:
