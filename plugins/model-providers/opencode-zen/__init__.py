@@ -26,6 +26,29 @@ def _flat_model_name(model: str | None) -> str:
     return (model or "").strip().rsplit("/", 1)[-1].lower()
 
 
+def _keyless_model_id(model: str | None, prefixes: tuple = ()) -> str:
+    """Bare model id for the keyless check, or "" when the spelling is not one we authorize.
+
+    Accepts only the two forms that reach the relay as the bare keyless slug: the id itself,
+    and the id behind a prefix that :func:`normalize_opencode_model_id` strips before the wire
+    call. That normalizer strips ``<provider_id>/`` and ``<family>/``, which for this profile is
+    ``opencode-zen/`` and ``opencode/`` — NOT every alias (``zen/`` and ``opencode_zen/`` survive
+    it), so the stripped prefixes are spelled out rather than taken from ``aliases``. Anything
+    else is refused, because the id sent to the relay would then differ from the id authorized
+    here.
+    """
+    current = (model or "").strip()
+    if not current:
+        return ""
+    head, sep, tail = current.rpartition("/")
+    if not sep:
+        return current.lower()
+    # One prefix segment only, and it must be one the wire normalizer actually strips.
+    if "/" in head:
+        return ""
+    return tail.lower() if head.lower() in {p.lower() for p in prefixes} else ""
+
+
 # Version-less DeepSeek ids that still carry the thinking/effort knobs on this wire: the retired
 # ``deepseek-reasoner`` alias and the canonical ``deepseek-flash`` (2026-09 Flash refresh), for
 # which the Go relay honours the same top-level ``reasoning_effort``/``thinking`` contract.
@@ -110,16 +133,27 @@ class OpenCodeGoProfile(ProviderProfile):
 class OpenCodeZenProfile(ProviderProfile):
     """OpenCode Zen - model-specific reasoning and anonymous-access controls."""
 
+    # Only the prefixes normalize_opencode_model_id strips for this family; see _keyless_model_id.
+    _KEYLESS_PREFIXES = ("opencode-zen", "opencode")
+
     def supports_anonymous_access(self, *, model: str | None, base_url: str | None = None) -> bool:
         """Allow only the documented free chat model on Zen's official HTTPS endpoint.
 
         A public ``/models`` response or a ``-free`` suffix is not proof that a model
         accepts anonymous inference. Keep this exact and endpoint-scoped so a proxy or
         future paid model cannot inherit keyless access accidentally.
+
+        ``base_url`` is the endpoint the caller will actually use, so an absent one is
+        refused rather than defaulted to :attr:`base_url`: substituting our own endpoint
+        would decide the grant against a URL the caller never validated. Fail-closed like
+        every other condition here.
         """
-        if _flat_model_name(model) not in self.keyless_model_ids:
+        # Only the prefixes normalize_opencode_model_id strips for this family; see _keyless_model_id.
+        if _keyless_model_id(model, self._KEYLESS_PREFIXES) not in self.keyless_model_ids:
             return False
-        candidate = str(base_url or self.base_url or "").strip()
+        candidate = str(base_url or "").strip()
+        if not candidate:
+            return False
         try:
             parsed = urlparse(candidate)
             return bool(

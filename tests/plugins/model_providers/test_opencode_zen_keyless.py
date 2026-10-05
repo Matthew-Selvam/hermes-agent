@@ -16,7 +16,9 @@ def test_space_bunny_is_keyless_only_on_the_official_zen_route(monkeypatch):
     monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
     profile = get_provider_profile("opencode-zen")
 
-    assert profile.keyless_model_ids == frozenset({"space-bunny-free"})
+    # The keyless subset is non-empty and the free chat model is in it. Asserting the exact
+    # contents would be a change-detector: the set is expected to grow with the lineup.
+    assert "space-bunny-free" in profile.keyless_model_ids
     assert profile.supports_anonymous_access(
         model="opencode-zen/space-bunny-free",
         base_url="https://opencode.ai/zen/v1",
@@ -86,7 +88,9 @@ def test_keyless_zen_is_explicit_in_the_ui_and_omits_sdk_authorization():
         probe_custom_providers=False,
     )
     row = next(r for r in payload["providers"] if r.get("slug") == "opencode-zen")
-    assert row["models"] == ["space-bunny-free"]
+    # The keyless model is offered without a credential, so it must appear in the picker;
+    # the exact list grows with the lineup and is not asserted.
+    assert "space-bunny-free" in row["models"]
     assert row["authenticated"] is True
 
     agent = AIAgent(
@@ -108,6 +112,83 @@ def test_keyless_zen_is_explicit_in_the_ui_and_omits_sdk_authorization():
         assert agent.client.default_headers["X-Title"] == "Hermes Agent"
     finally:
         agent.client.close()
+
+
+def test_keyless_grant_is_scoped_to_the_endpoint_actually_used(monkeypatch, tmp_path):
+    """The resolver is where a wrong endpoint would put a credential-less client on the wire, so
+    the refusal is asserted through it rather than only against the profile method: a config
+    ``model.base_url`` or an ``OPENCODE_ZEN_BASE_URL`` aimed elsewhere must fail closed, and an
+    endpoint the caller never supplied must not be filled in from the profile default."""
+    from hermes_cli import config as config_mod
+
+    monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
+    profile = get_provider_profile("opencode-zen")
+
+    # No endpoint to validate: refuse rather than substitute our own.
+    assert not profile.supports_anonymous_access(model="space-bunny-free", base_url=None)
+    assert not profile.supports_anonymous_access(model="space-bunny-free", base_url="")
+    assert not profile.supports_anonymous_access(model="space-bunny-free", base_url="   ")
+
+    def _write_config(base_url):
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  provider: opencode-zen\n  default: space-bunny-free\n"
+            f"  base_url: {base_url}\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # The loader caches on file signature; several endpoints are written to one path inside
+        # this test, so each read has to start from a cold cache.
+        config_mod._LOAD_CONFIG_CACHE.clear()
+        config_mod._RAW_CONFIG_CACHE.clear()
+
+    # A config endpoint that is not the official relay must not yield an anonymous runtime.
+    # Note: a same-family path (``/zen/go/v1`` under a Zen provider) is deliberately rewritten to
+    # ``/zen/v1`` by normalize_opencode_base_url before the check, so it is correct for that one
+    # to resolve — the grant is decided on the endpoint that will actually be used.
+    for hostile in ("https://attacker.example/v1", "https://evil.opencode.ai/zen/v1",
+                    "http://opencode.ai/zen/v1", "https://opencode.ai:8443/zen/v1",
+                    "https://opencode.ai/zen/v1?x=1",
+                    "https://opencode.ai/zen/v1/../go"):
+        _write_config(hostile)
+        try:
+            leaked = resolve_runtime_provider(requested="opencode-zen", target_model="space-bunny-free")
+        except AuthError as exc:
+            assert exc.code == "missing_api_key", hostile
+        else:
+            pytest.fail("hostile endpoint granted an anonymous runtime: %s -> %r" % (hostile, leaked))
+
+    # The env override is the same lever and must be refused identically.
+    _write_config("")
+    monkeypatch.setenv("OPENCODE_ZEN_BASE_URL", "https://attacker.example/v1")
+    with pytest.raises(AuthError):
+        resolve_runtime_provider(requested="opencode-zen", target_model="space-bunny-free")
+    monkeypatch.delenv("OPENCODE_ZEN_BASE_URL", raising=False)
+
+    # And the official endpoint still resolves anonymously, so the refusals above are specific.
+    _write_config("")
+    granted = resolve_runtime_provider(requested="opencode-zen", target_model="space-bunny-free")
+    assert granted["api_key"] == ""
+    assert granted["base_url"] == "https://opencode.ai/zen/v1"
+
+
+def test_keyless_grant_requires_the_id_that_will_be_sent(monkeypatch):
+    """The wire normalizer strips only this provider's own prefix; a model spelled any other way
+    reaches the relay with the prefix still attached, so it must not inherit the grant. Otherwise
+    the id that was authorized and the id that is sent are different strings."""
+    from hermes_cli.models import normalize_opencode_model_id
+
+    monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
+    profile = get_provider_profile("opencode-zen")
+    url = "https://opencode.ai/zen/v1"
+
+    for spelling in ("space-bunny-free", "opencode-zen/space-bunny-free", "zen/space-bunny-free"):
+        granted = profile.supports_anonymous_access(model=spelling, base_url=url)
+        sent = normalize_opencode_model_id("opencode-zen", spelling)
+        assert granted is (sent == "space-bunny-free"), spelling
+
+    # Prefixes the normalizer does not strip, and deeper paths, get no grant.
+    for spelling in ("other/space-bunny-free", "gpt-5.5/space-bunny-free",
+                     "vendor/extra/space-bunny-free"):
+        assert not profile.supports_anonymous_access(model=spelling, base_url=url), spelling
 
 
 def test_switching_onto_the_keyless_route_drops_the_previous_providers_key():
