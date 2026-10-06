@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from hermes_cli.auth import AuthError
@@ -189,6 +191,35 @@ def test_keyless_grant_requires_the_id_that_will_be_sent(monkeypatch):
     for spelling in ("other/space-bunny-free", "gpt-5.5/space-bunny-free",
                      "vendor/extra/space-bunny-free"):
         assert not profile.supports_anonymous_access(model=spelling, base_url=url), spelling
+
+
+def test_aux_client_routes_a_keyless_task_without_manufacturing_a_credential(monkeypatch):
+    """The auxiliary branch builds its own client instead of routing through the resolver, so it
+    needs its own contract: a keyless task on the official endpoint must resolve to a credential-less
+    client rather than being reported as unconfigured, and the sibling cases (a paid model, or the
+    keyless model aimed at another host) must keep resolving to nothing."""
+    monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
+    from agent.auxiliary_client import resolve_provider_client
+
+    official = "https://opencode.ai/zen/v1"
+
+    with patch("agent.auxiliary_client._create_openai_client") as make_client:
+        make_client.return_value = MagicMock()
+        client, model = resolve_provider_client("opencode-zen", model="space-bunny-free")
+    assert client is not None, "a keyless aux task must resolve instead of being dropped"
+    assert make_client.call_args.kwargs["api_key"] == ""
+    assert make_client.call_args.kwargs["base_url"] == official
+
+    # A paid model on the same credential-free provider is still unconfigured.
+    client, model = resolve_provider_client("opencode-zen", model="gpt-5.5")
+    assert (client, model) == (None, None)
+
+    # And the keyless grant does not follow the model to a host it was never granted for: this
+    # branch builds the client from the endpoint it is handed, so a wrong one must resolve to
+    # nothing rather than produce a credential-less client pointed at it.
+    client, model = resolve_provider_client(
+        "opencode-zen", model="space-bunny-free", explicit_base_url="https://attacker.example/v1")
+    assert (client, model) == (None, None)
 
 
 def test_switching_onto_the_keyless_route_drops_the_previous_providers_key():
