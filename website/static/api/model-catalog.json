@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-11-23T20:38:09Z",
+  "updated_at": "2026-11-24T06:51:17Z",
   "metadata": {
     "source": "hermes-agent repo",
     "docs": "https://hermes-agent.nousresearch.com/docs/reference/model-catalog"
@@ -292,6 +292,10 @@
         {
           "id": "openrouter/pareto-code",
           "description": "auto-routes to cheapest coder meeting openrouter.min_coding_score"
+        },
+        {
+          "id": "openrouter/free",
+          "description": "free router \u2014 auto-picks an available free model"
         },
         {
           "id": "thinkingmachines/inkling:free",

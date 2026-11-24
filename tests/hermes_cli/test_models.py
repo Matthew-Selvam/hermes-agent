@@ -1549,3 +1549,24 @@ class TestAzureFoundryPickerCatalog:
         monkeypatch.setattr(_models_mod, "_get_model_config_dict",
                             lambda: {"provider": "azure-foundry", "base_url": "https://b.openai.azure.com/openai/v1"})
         assert _models_mod._credential_fingerprint("azure-foundry") != fp_a
+
+
+class TestFreeRouterEntry:
+    """``openrouter/free`` is the no-cost entry point to OpenRouter (#39933): users who want a free model
+    without picking a specific ``:free`` backend must find it in the picker."""
+
+    def test_curated_picker_carries_the_free_router(self):
+        entry = dict(OPENROUTER_MODELS).get("openrouter/free")
+        assert entry is not None, "openrouter/free missing from the curated OpenRouter list"
+        assert "free" in entry.lower()
+
+    def test_checked_in_manifest_matches_the_source_list(self):
+        """The manifest is generated from the lists above; a hand-edited JSON would drift silently."""
+        import json
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        manifest = json.loads((root / "website/static/api/model-catalog.json").read_text())
+        ids = [m["id"] for m in manifest["providers"]["openrouter"]["models"]]
+        assert ids == [mid for mid, _ in OPENROUTER_MODELS]
+        assert "openrouter/free" in ids
